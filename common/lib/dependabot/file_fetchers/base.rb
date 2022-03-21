@@ -224,6 +224,28 @@ module Dependabot
         end
 
         github_response.map { |f| _build_github_file_struct(f) }
+      rescue Octokit::Forbidden, Octokit::TooLargeContent => e
+        raise unless e.message.match?("too_large")
+
+        # Fall back to Git Data API to fetch the file
+        prefix_dir = directory.gsub(%r{(^/|/$)}, "")
+        dir = File.dirname(path).gsub(%r{^/?#{Regexp.escape(prefix_dir)}/?}, "")
+        basename = File.basename(path)
+        file_details = repo_contents(dir: dir).find { |f| f.name == basename }
+        raise unless file_details
+
+        tmp = github_client.blob(repo, file_details.sha)
+        return tmp.content if tmp.encoding == "utf-8"
+
+        content = Base64.decode64(tmp.content).force_encoding("UTF-8").encode
+
+        OpenStruct.new(
+          name: file_details.name,
+          path: file_details.path,
+          type: file_details.type,
+          size: content.size,
+          content: content
+        )
       end
 
       def _cloned_repo_contents(relative_path)
@@ -447,8 +469,8 @@ module Dependabot
         end
 
         Base64.decode64(tmp.content).force_encoding("UTF-8").encode
-      rescue Octokit::Forbidden => e
-        raise unless e.message.include?("too_large")
+      rescue Octokit::Forbidden, Octokit::TooLargeContent => e
+        raise unless e.message.match?("too_large")
 
         # Fall back to Git Data API to fetch the file
         prefix_dir = directory.gsub(%r{(^/|/$)}, "")
